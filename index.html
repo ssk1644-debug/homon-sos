@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="訪問SOS">
+<meta name="theme-color" content="#1f2a37">
+<title>訪問SOS</title>
+<style>
+:root{--bg:#1f2a37;--card:#2b3848;--text:#f4f6f8;--sub:#a9b4c2;--help:#f2a33a;--sos:#e0413a;--ok:#2fa36b;--line:#3a4a5e}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;-webkit-user-select:none;user-select:none}
+body{min-height:100vh;padding:calc(env(safe-area-inset-top) + 12px) 16px calc(env(safe-area-inset-bottom) + 16px)}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+header h1{font-size:18px;margin:0}
+header button{background:none;border:1px solid var(--line);color:var(--sub);border-radius:8px;padding:6px 10px;font-size:13px}
+.card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:14px}
+.who{font-size:13px;color:var(--sub)}
+.who b{color:var(--text);font-size:15px}
+label{display:block;font-size:13px;color:var(--sub);margin:10px 0 4px}
+input,textarea{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);background:#16202b;color:var(--text);font-size:16px;-webkit-user-select:text;user-select:text}
+.visit-row{display:flex;gap:8px}
+.visit-row input{flex:1}
+.btn{border:none;border-radius:12px;font-size:16px;font-weight:700;padding:12px 14px;color:#fff}
+.btn.gray{background:#46586e}
+.btn.green{background:var(--ok)}
+.status{font-size:13px;color:var(--sub);margin-top:8px}
+.status.on{color:#7fe0ae}
+.big{position:relative;width:100%;border:none;border-radius:20px;color:#fff;font-weight:800;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
+.big small{font-weight:500;font-size:14px;opacity:.9;margin-top:6px}
+#helpBtn{background:var(--help);height:120px;font-size:28px;margin-bottom:14px;color:#2a1a00}
+#sosBtn{background:var(--sos);height:190px;font-size:40px}
+.fill{position:absolute;left:0;bottom:0;width:100%;height:0;background:rgba(255,255,255,.28);pointer-events:none}
+.big span{position:relative}
+.row2{display:flex;gap:10px;margin-top:14px}
+.row2 a{flex:1;text-align:center;text-decoration:none;padding:14px 8px;border-radius:12px;font-weight:700;font-size:15px}
+.tel110{background:#fff;color:var(--sos)}
+.telOffice{background:#46586e;color:#fff}
+#overlay{position:fixed;inset:0;background:rgba(10,15,20,.92);display:none;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;z-index:10}
+#overlay.show{display:flex}
+#overlay h2{font-size:26px;margin:0 0 12px}
+#overlay p{color:var(--sub);font-size:15px;line-height:1.6;margin:0 0 20px}
+#overlay .btn{min-width:220px;margin:6px}
+.sheet{position:fixed;inset:0;background:var(--bg);z-index:20;padding:calc(env(safe-area-inset-top) + 16px) 16px 24px;overflow:auto;display:none}
+.sheet.show{display:block}
+.sheet h2{font-size:18px}
+.note{font-size:12px;color:var(--sub);line-height:1.6}
+.demo{background:#5b4a17;color:#ffe7a8;font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:12px;display:none}
+.demo.show{display:block}
+#remoteChip{font-size:13px;padding:9px 12px;border-radius:10px;background:#16202b;border:1px solid var(--line);color:var(--sub);margin-bottom:14px;display:flex;justify-content:space-between;gap:8px}
+#remoteChip b{color:var(--text);font-weight:600}
+#remoteChip.flash{border-color:#7fe0ae;color:#7fe0ae}
+.rt-box{background:#16202b;border-radius:14px;padding:18px;text-align:center;margin:14px 0}
+.rt-count{font-size:56px;font-weight:800;line-height:1.1}
+.rt-judge{font-size:20px;font-weight:700;margin-top:8px;min-height:28px}
+.rt-key{font-size:12px;color:var(--sub);margin-top:8px;font-family:ui-monospace,Menlo,monospace}
+.rt-rules{font-size:14px;line-height:1.8;background:var(--card);border-radius:12px;padding:12px 14px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>訪問SOS</h1>
+  <button id="openSettings">設定</button>
+</header>
+
+<div class="demo" id="demoBar">デモモード：送信先が未設定のため、通知は実際には送られません（設定から登録してください）</div>
+
+<div id="remoteChip"><span>リモコン：<b id="remoteState">待機中</b></span><span id="awakeState">画面：通常</span></div>
+
+<div class="card">
+  <div class="who">使用者：<b id="whoName">未設定</b>　<span id="whoOffice"></span></div>
+  <label for="visitMemo">訪問先メモ（例：〇〇町 Aさん宅）※個人名はイニシャル推奨</label>
+  <div class="visit-row">
+    <input id="visitMemo" placeholder="訪問先を入力">
+    <button class="btn green" id="visitBtn">訪問開始</button>
+  </div>
+  <div class="status" id="visitStatus">訪問中ではありません</div>
+</div>
+
+<button class="big" id="helpBtn"><div class="fill"></div><span>ヘルプ</span><small>応援・電話がほしい（長押し1秒）</small></button>
+<button class="big" id="sosBtn"><div class="fill"></div><span>緊 急</span><small>今すぐ来て（長押し2秒）</small></button>
+
+<div class="row2">
+  <a class="tel110" href="tel:110">110番に電話</a>
+  <a class="telOffice" id="telOffice" href="#">事業所に電話</a>
+</div>
+
+<div id="overlay">
+  <h2 id="ovTitle">送信中…</h2>
+  <p id="ovText">位置情報を取得しています</p>
+  <button class="btn gray" id="ovClose" style="display:none">閉じる</button>
+  <button class="btn green" id="ovSafe" style="display:none">無事です（解除を通知）</button>
+</div>
+
+<div class="sheet" id="settings">
+  <h2>設定</h2>
+  <label>あなたの名前</label>
+  <input id="sName" placeholder="例：山田 花子">
+  <label>事業所名</label>
+  <input id="sOffice" placeholder="例：〇〇居宅介護支援事業所">
+  <label>事業所の電話番号</label>
+  <input id="sTel" inputmode="tel" placeholder="例：084-000-0000">
+  <label>送信先URL（管理者から受け取ったもの）</label>
+  <input id="sUrl" placeholder="https://script.google.com/macros/s/.../exec">
+  <label>事業所コード（管理者から受け取ったもの）</label>
+  <input id="sKey" placeholder="例：abc123">
+  <div class="row2">
+    <button class="btn gray" id="sTest" style="flex:1">テスト送信</button>
+    <button class="btn green" id="sSave" style="flex:1">保存</button>
+  </div>
+  <div class="row2">
+    <button class="btn gray" id="openRemoteTest" style="flex:1">Bluetoothスイッチのテスト</button>
+  </div>
+  <p class="note">
+    ・位置情報の利用を「許可」してください（iPhone：設定 → Safari → 位置情報 →「確認」または「許可」）。<br>
+    ・ホーム画面に追加すると、アプリのようにすぐ開けます（Safariの共有ボタン →「ホーム画面に追加」）。<br>
+    ・このアプリは事業所への応援要請用です。命に関わるときは迷わず110番してください。
+  </p>
+</div>
+
+<div class="sheet" id="remoteTest">
+  <h2>Bluetoothスイッチのテスト</h2>
+  <div class="rt-rules">
+    3回続けて押す → <b>ヘルプ</b><br>
+    5回続けて押す　または　2秒長押し → <b>緊急</b><br>
+    1〜2回 → 何もしない（誤って押したときの対策）
+  </div>
+  <div class="rt-box">
+    <div class="rt-count" id="rtCount">0</div>
+    <div class="rt-judge" id="rtJudge">スイッチを押してください</div>
+    <div class="rt-key" id="rtKey">受信した信号：まだありません</div>
+  </div>
+  <p class="note">
+    ・テスト中は通報は送られません。<br>
+    ・押しても数字が増えない場合は、スイッチが「音量ボタン」の信号を送るタイプのため、このアプリでは使えません（iPhoneの仕様）。<br>
+    ・反応しないときは、画面を一度タップしてからもう一度押してください。
+  </p>
+  <div class="row2"><button class="btn green" id="closeRemoteTest" style="flex:1">テストを終わる</button></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem('cmsos_'+k); return v===null? d : JSON.parse(v); }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem('cmsos_'+k, JSON.stringify(v)); }catch(e){} }
+};
+let cfg = store.get('cfg', {name:'', office:'', tel:'', url:'', key:''});
+let visit = store.get('visit', null);
+let lastEventId = null;
+
+function render(){
+  $('whoName').textContent = cfg.name || '未設定';
+  $('whoOffice').textContent = cfg.office || '';
+  $('telOffice').href = cfg.tel ? 'tel:'+cfg.tel.replace(/[^0-9+]/g,'') : '#';
+  $('demoBar').classList.toggle('show', !cfg.url);
+  if(visit){
+    $('visitMemo').value = visit.memo;
+    $('visitBtn').textContent = '退出';
+    $('visitBtn').className = 'btn gray';
+    $('visitStatus').textContent = '訪問中：' + visit.memo + '（' + new Date(visit.at).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'}) + '〜）';
+    $('visitStatus').classList.add('on');
+  }else{
+    $('visitBtn').textContent = '訪問開始';
+    $('visitBtn').className = 'btn green';
+    $('visitStatus').textContent = '訪問中ではありません';
+    $('visitStatus').classList.remove('on');
+  }
+}
+
+// ---- 位置情報 ----
+function getPos(timeoutMs){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation) return resolve(null);
+    let done = false;
+    const t = setTimeout(()=>{ if(!done){ done=true; resolve(null); } }, timeoutMs);
+    navigator.geolocation.getCurrentPosition(p=>{
+      if(done) return; done=true; clearTimeout(t);
+      resolve({lat:p.coords.latitude, lng:p.coords.longitude, acc:Math.round(p.coords.accuracy)});
+    }, ()=>{ if(!done){ done=true; clearTimeout(t); resolve(null); } }, {enableHighAccuracy:true, timeout:timeoutMs, maximumAge:30000});
+  });
+}
+
+// ---- 送信 ----
+async function send(payload){
+  payload.key = cfg.key; payload.name = cfg.name; payload.office = cfg.office;
+  payload.visit = visit ? visit.memo : ($('visitMemo').value || '');
+  payload.visitLoc = visit ? visit.pos : null;
+  payload.sentAt = new Date().toISOString();
+  if(!cfg.url){ await new Promise(r=>setTimeout(r,800)); return {ok:true, demo:true, id:'demo'}; }
+  const body = JSON.stringify(payload);
+  try{
+    const res = await fetch(cfg.url, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body});
+    const j = await res.json();
+    return j;
+  }catch(e){
+    // 応答が読めなくても届いている場合があるため、念のためビーコンでも送る
+    try{ if(navigator.sendBeacon && navigator.sendBeacon(cfg.url, body)) return {ok:true, uncertain:true}; }catch(_){}
+    return {ok:false, error:String(e)};
+  }
+}
+
+function showOverlay(title, text, opts={}){
+  $('ovTitle').textContent = title;
+  $('ovText').innerHTML = text;
+  $('ovClose').style.display = opts.close ? 'inline-block' : 'none';
+  $('ovSafe').style.display = opts.safe ? 'inline-block' : 'none';
+  $('overlay').classList.add('show');
+}
+
+let busy = false;
+async function alarm(type, via){
+  if(!cfg.name){ openSettings(); return; }
+  if(busy) return;
+  busy = true;
+  try{ await doAlarm(type, via); } finally { busy = false; }
+}
+async function doAlarm(type, via){
+  if(navigator.vibrate) navigator.vibrate([80,60,80]);
+  const label = type==='sos' ? '緊急' : 'ヘルプ';
+  showOverlay(label+'を送信中…', '位置情報を取得しています');
+  const pos = await getPos(6000);
+  $('ovText').textContent = '事業所へ送信しています';
+  const r = await send({type, pos, via: via || 'screen'});
+  if(r.ok){
+    lastEventId = r.id || null;
+    const locMsg = pos ? '現在地も送信しました。' : '<b>位置情報は取得できませんでした。</b>訪問先メモを送っています。';
+    const extra = r.demo ? '<br>（デモモードのため実際には送られていません）' : (r.uncertain ? '<br>（送信確認が取れませんでした。念のため電話もしてください）' : '');
+    showOverlay(label+'を送信しました', '事業所の全員に通知しました。' + locMsg + extra +
+      (type==='sos' ? '<br><br>身の危険があるときは<b>その場を離れ、110番</b>してください。' : ''), {close:true, safe:true});
+  }else{
+    showOverlay('送信できませんでした', '電波が弱い可能性があります。<br><b>すぐに電話してください。</b><br><br><a href="tel:110" style="color:#fff">110番</a>　／　<a href="'+$('telOffice').href+'" style="color:#fff">事業所</a>', {close:true});
+  }
+}
+
+// ---- 長押しボタン ----
+function holdButton(el, ms, onFire){
+  const fill = el.querySelector('.fill');
+  let start=null, raf=null, fired=false;
+  const step = ts => {
+    if(start===null) start = ts;
+    const p = Math.min(1, (ts-start)/ms);
+    fill.style.height = (p*100)+'%';
+    if(p>=1){ fired=true; cancel(); onFire(); return; }
+    raf = requestAnimationFrame(step);
+  };
+  const begin = e => { e.preventDefault(); fired=false; start=null; if(navigator.vibrate) navigator.vibrate(30); raf=requestAnimationFrame(step); };
+  const cancel = () => { if(raf) cancelAnimationFrame(raf); raf=null; fill.style.height='0'; };
+  el.addEventListener('pointerdown', begin);
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>el.addEventListener(ev, cancel));
+  el.addEventListener('contextmenu', e=>e.preventDefault());
+}
+holdButton($('helpBtn'), 1000, ()=>alarm('help'));
+holdButton($('sosBtn'), 2000, ()=>alarm('sos'));
+
+$('ovClose').onclick = ()=> $('overlay').classList.remove('show');
+$('ovSafe').onclick = async ()=>{
+  showOverlay('解除を送信中…','');
+  const r = await send({type:'safe', ref:lastEventId, pos:null});
+  showOverlay(r.ok ? '解除を通知しました' : '解除を送れませんでした', r.ok ? '「無事です」と事業所に伝えました。' : '事業所に電話で無事を伝えてください。', {close:true});
+};
+
+// ---- 訪問開始／退出（端末内に記録。緊急時に訪問先として一緒に送る）----
+$('visitBtn').onclick = async ()=>{
+  if(visit){ visit=null; store.set('visit', null); $('visitMemo').value=''; render(); keepAwake(false); return; }
+  const memo = $('visitMemo').value.trim();
+  if(!memo){ $('visitMemo').focus(); return; }
+  visit = {memo, at:Date.now(), pos:null};
+  store.set('visit', visit); render();
+  keepAwake(true);
+  const pos = await getPos(8000);
+  if(visit){ visit.pos = pos; store.set('visit', visit); }
+};
+
+// ---- 設定 ----
+function openSettings(){
+  $('sName').value=cfg.name; $('sOffice').value=cfg.office; $('sTel').value=cfg.tel; $('sUrl').value=cfg.url; $('sKey').value=cfg.key;
+  $('settings').classList.add('show');
+}
+function readSettings(){
+  return {name:$('sName').value.trim(), office:$('sOffice').value.trim(), tel:$('sTel').value.trim(), url:$('sUrl').value.trim(), key:$('sKey').value.trim()};
+}
+$('openSettings').onclick = openSettings;
+$('sSave').onclick = ()=>{ cfg = readSettings(); store.set('cfg', cfg); $('settings').classList.remove('show'); render(); getPos(8000); };
+$('sTest').onclick = async ()=>{
+  cfg = readSettings(); store.set('cfg', cfg);
+  $('sTest').textContent='送信中…';
+  const r = await send({type:'test', pos: await getPos(6000)});
+  $('sTest').textContent = r.ok ? (r.demo ? 'デモ（URL未設定）' : '送信OK') : '失敗：URLかコードを確認';
+  setTimeout(()=>$('sTest').textContent='テスト送信', 3000);
+};
+
+// ---- 訪問中は画面を消さない ----
+let wakeLock = null;
+async function keepAwake(on){
+  try{
+    if(on && 'wakeLock' in navigator && !wakeLock){
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', ()=>{ wakeLock=null; updateAwake(); });
+    }else if(!on && wakeLock){
+      await wakeLock.release(); wakeLock = null;
+    }
+  }catch(e){}
+  updateAwake();
+}
+function updateAwake(){
+  $('awakeState').textContent = wakeLock ? '画面：ON維持中' : (visit ? '画面：自動で消えます' : '画面：通常');
+}
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && visit) keepAwake(true); });
+
+// ---- Bluetoothスイッチ（キーボードとして認識されるもの）----
+const GAP_MS = 1200;   // 押す間隔がこれを超えたら回数を確定
+const HOLD_MS = 2000;  // 長押しで緊急
+let presses = 0, gapTimer = null, holdTimer = null, keyIsDown = false, holdFired = false, remoteTesting = false, chipTimer = null;
+
+function isTyping(){ const a=document.activeElement; return a && (a.tagName==='INPUT' || a.tagName==='TEXTAREA'); }
+function chip(text){
+  $('remoteState').textContent = text;
+  $('remoteChip').classList.add('flash');
+  clearTimeout(chipTimer);
+  chipTimer = setTimeout(()=>{ $('remoteChip').classList.remove('flash'); $('remoteState').textContent='待機中'; }, 2500);
+}
+function judge(type, how){
+  const label = type==='sos' ? '緊急' : 'ヘルプ';
+  if(remoteTesting){
+    $('rtJudge').innerHTML = '判定：<span style="color:'+(type==='sos'?'var(--sos)':'var(--help)')+'">'+label+'</span>（'+how+'）';
+    return;
+  }
+  chip(label+'を送信（'+how+'）');
+  alarm(type, 'remote');
+}
+function settle(){
+  const n = presses; presses = 0;
+  if(n >= 5) judge('sos', n+'回連続');
+  else if(n >= 3) judge('help', n+'回連続');
+  else if(remoteTesting) $('rtJudge').textContent = n+'回 → 何もしない';
+  else chip(n+'回受信（通報なし）');
+}
+document.addEventListener('keydown', e=>{
+  if(isTyping()) return;
+  e.preventDefault();
+  if(remoteTesting) $('rtKey').textContent = '受信した信号：key=' + e.key + ' / code=' + (e.code||'-') + ' / ' + (e.keyCode||'-');
+  if(e.repeat || keyIsDown) return;
+  keyIsDown = true; holdFired = false;
+  clearTimeout(gapTimer);
+  holdTimer = setTimeout(()=>{ holdFired = true; presses = 0; if(remoteTesting) $('rtCount').textContent='長押し'; judge('sos', '長押し'); }, HOLD_MS);
+});
+document.addEventListener('keyup', e=>{
+  if(isTyping()) return;
+  e.preventDefault();
+  clearTimeout(holdTimer);
+  keyIsDown = false;
+  if(holdFired) return;
+  presses++;
+  if(remoteTesting){ $('rtCount').textContent = presses; $('rtJudge').textContent = '…'; }
+  else chip(presses+'回');
+  clearTimeout(gapTimer);
+  gapTimer = setTimeout(settle, GAP_MS);
+});
+window.addEventListener('blur', ()=>{ clearTimeout(holdTimer); keyIsDown = false; });
+
+$('openRemoteTest').onclick = ()=>{
+  if(document.activeElement) document.activeElement.blur();
+  remoteTesting = true; presses = 0;
+  $('rtCount').textContent='0'; $('rtJudge').textContent='スイッチを押してください';
+  $('remoteTest').classList.add('show');
+};
+$('closeRemoteTest').onclick = ()=>{ remoteTesting = false; $('remoteTest').classList.remove('show'); };
+
+render();
+updateAwake();
+if(visit) keepAwake(true);
+if(!cfg.name) openSettings(); else getPos(8000); // 起動時に位置情報の許可を取っておく
+</script>
+</body>
+</html>
