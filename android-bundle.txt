@@ -1,0 +1,819 @@
+訪問SOS Android版 ソース一式（GitHub Actionsでこのファイルを分解してビルドします）
+=====FILE: android/settings.gradle=====
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+dependencyResolutionManagement {
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = "homon-sos"
+include ':app'
+=====FILE: android/build.gradle=====
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+=====FILE: android/gradle.properties=====
+org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+android.useAndroidX=false
+=====FILE: android/app/build.gradle=====
+plugins {
+    id 'com.android.application'
+}
+android {
+    namespace 'jp.asuport.homonsos'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'jp.asuport.homonsos'
+        minSdk 26
+        targetSdk 34
+        versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
+        versionName '0.1.' + (System.getenv('GITHUB_RUN_NUMBER') ?: '1')
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+=====FILE: android/app/src/main/AndroidManifest.xml=====
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@android:drawable/ic_dialog_alert"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Material.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".SosService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <service
+            android:name=".KeyService"
+            android:exported="false"
+            android:label="@string/acc_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_config" />
+        </service>
+    </application>
+</manifest>
+=====FILE: android/app/src/main/res/values/strings.xml=====
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">訪問SOS</string>
+    <string name="acc_label">訪問SOS スイッチ受信</string>
+    <string name="acc_desc">訪問中に、Bluetoothスイッチ（リモコン）の操作を受け取って事業所へヘルプ・緊急通報を送ります。訪問中以外はスイッチの操作を受け取りません。</string>
+</resources>
+=====FILE: android/app/src/main/res/xml/accessibility_config.xml=====
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRequestFilterKeyEvents"
+    android:canRequestFilterKeyEvents="true"
+    android:notificationTimeout="100"
+    android:description="@string/acc_desc" />
+=====FILE: android/app/src/main/java/jp/asuport/homonsos/Sos.java=====
+package jp.asuport.homonsos;
+
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.location.Location;
+import android.location.LocationManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
+
+/** 共通の状態と、スイッチの押し方の判定 */
+public class Sos {
+    public static final String TEST_URL = "https://script.google.com/macros/s/AKfycbwYM_GhXwNoYwjAzd0SDbT3tQgMOZXshWfkZgcXmDTy1BflUhn60KipDLMmQNpMKkYM/exec";
+    public static final String TEST_KEY = "sos-2026";
+
+    public static final long GAP_MS = 1200;   // 押す間隔がこれを超えたら回数を確定
+    public static final long HOLD_MS = 2000;  // 長押しで緊急
+
+    public interface Listener { void onEvent(String what, String value); }
+
+    public static volatile boolean testMode = false;
+    public static Listener listener;
+    public static volatile Location lastLoc;
+    public static volatile long screenOnAt = 0;
+
+    static final Handler H = new Handler(Looper.getMainLooper());
+    private static int presses = 0;
+    private static boolean down = false, holdFired = false;
+    private static Context app;
+
+    public static SharedPreferences prefs(Context c) {
+        return c.getSharedPreferences("sos", Context.MODE_PRIVATE);
+    }
+    public static boolean visiting(Context c) { return prefs(c).getBoolean("visiting", false); }
+    public static String url(Context c) { return prefs(c).getString("url", TEST_URL); }
+    public static String key(Context c) { return prefs(c).getString("key", TEST_KEY); }
+
+    public static boolean accEnabled(Context c) {
+        String s = Settings.Secure.getString(c.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        return s != null && s.contains(c.getPackageName() + "/");
+    }
+
+    public static void ensureChannels(Context c) {
+        NotificationManager nm = c.getSystemService(NotificationManager.class);
+        if (nm.getNotificationChannel("visit") == null) {
+            NotificationChannel v = new NotificationChannel("visit", "訪問中", NotificationManager.IMPORTANCE_LOW);
+            v.setDescription("訪問中であることを表示します");
+            nm.createNotificationChannel(v);
+        }
+        if (nm.getNotificationChannel("result") == null) {
+            NotificationChannel r = new NotificationChannel("result", "送信結果", NotificationManager.IMPORTANCE_HIGH);
+            r.setDescription("ヘルプ・緊急通報の送信結果");
+            nm.createNotificationChannel(r);
+        }
+    }
+
+    /** 一番新しい位置情報（10分以内）。なければnull */
+    public static Location bestLocation(Context c) {
+        Location best = lastLoc;
+        try {
+            LocationManager lm = c.getSystemService(LocationManager.class);
+            for (String p : lm.getProviders(true)) {
+                Location l = lm.getLastKnownLocation(p);
+                if (l != null && (best == null || l.getTime() > best.getTime())) best = l;
+            }
+        } catch (SecurityException ignored) { }
+        if (best != null && System.currentTimeMillis() - best.getTime() > 10 * 60 * 1000) return null;
+        return best;
+    }
+
+    static void emit(String what, String value) {
+        Listener l = listener;
+        if (l != null) H.post(() -> l.onEvent(what, value));
+    }
+
+    // ---- スイッチの押し方の判定（KeyServiceから呼ばれる。メインスレッド） ----
+    public static void keyDown(Context c, String info) {
+        app = c.getApplicationContext();
+        if (testMode) emit("key", info);
+        if (down) return;
+        down = true;
+        holdFired = false;
+        H.removeCallbacks(SETTLE);
+        // 画面が消えていたとき、1回目の押下は画面を点けるだけで届かないことがあるので1回分を補う
+        if (!testMode && presses == 0 && System.currentTimeMillis() - screenOnAt < 1500) presses = 1;
+        H.postDelayed(HOLD, HOLD_MS);
+    }
+
+    public static void keyUp(Context c) {
+        app = c.getApplicationContext();
+        H.removeCallbacks(HOLD);
+        down = false;
+        if (holdFired) return;
+        presses++;
+        if (testMode) emit("count", String.valueOf(presses));
+        H.removeCallbacks(SETTLE);
+        H.postDelayed(SETTLE, GAP_MS);
+    }
+
+    private static final Runnable HOLD = () -> {
+        holdFired = true;
+        presses = 0;
+        if (testMode) emit("count", "長押し");
+        trigger("sos", "長押し");
+    };
+
+    private static final Runnable SETTLE = () -> {
+        int n = presses;
+        presses = 0;
+        if (n >= 5) trigger("sos", n + "回連続");
+        else if (n >= 3) trigger("help", n + "回連続");
+        else if (testMode) emit("judge", n + "回 → 何もしない");
+    };
+
+    private static void trigger(String type, String how) {
+        String label = "sos".equals(type) ? "緊急" : "ヘルプ";
+        if (testMode) {
+            emit("judge", "判定：" + label + "（" + how + "）");
+            return;
+        }
+        if (app != null) Sender.send(app, type, "remote");
+    }
+}
+=====FILE: android/app/src/main/java/jp/asuport/homonsos/Sender.java=====
+package jp.asuport.homonsos;
+
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.location.Location;
+import android.location.LocationManager;
+import android.os.Build;
+import android.os.CancellationSignal;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/** 事業所（Apps Script）への送信 */
+public class Sender {
+
+    public static void send(Context ctx, String type, String via) {
+        final Context c = ctx.getApplicationContext();
+        new Thread(() -> {
+            SharedPreferences p = Sos.prefs(c);
+            boolean ok = false;
+            String err = "";
+            Location loc = null;
+            try {
+                loc = freshLocation(c);
+                JSONObject body = new JSONObject();
+                body.put("type", type);
+                body.put("key", Sos.key(c));
+                body.put("name", p.getString("name", ""));
+                body.put("office", p.getString("office", ""));
+                body.put("visit", Sos.visiting(c) ? p.getString("memo", "") : "");
+                body.put("via", via);
+                if (loc != null) {
+                    JSONObject pos = new JSONObject();
+                    pos.put("lat", loc.getLatitude());
+                    pos.put("lng", loc.getLongitude());
+                    pos.put("acc", Math.round(loc.getAccuracy()));
+                    body.put("pos", pos);
+                }
+                String res = post(Sos.url(c), body.toString());
+                JSONObject j = new JSONObject(res);
+                ok = j.optBoolean("ok", false);
+                err = j.optString("error", "");
+            } catch (Exception e) {
+                err = e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+            vibrate(c, ok);
+            notifyResult(c, type, ok, loc != null, err);
+            Sos.emit("sent", (ok ? "OK" : "NG") + " " + type + " " + err);
+        }).start();
+    }
+
+    /** 2分以内の位置があればそれを使い、なければ最大6秒待って取り直す */
+    static Location freshLocation(Context c) {
+        Location best = Sos.bestLocation(c);
+        if (best != null && System.currentTimeMillis() - best.getTime() < 2 * 60 * 1000) return best;
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                LocationManager lm = c.getSystemService(LocationManager.class);
+                String provider = lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
+                final Location[] got = new Location[1];
+                CountDownLatch latch = new CountDownLatch(1);
+                lm.getCurrentLocation(provider, new CancellationSignal(), Executors.newSingleThreadExecutor(), l -> { got[0] = l; latch.countDown(); });
+                latch.await(6, TimeUnit.SECONDS);
+                if (got[0] != null) { Sos.lastLoc = got[0]; return got[0]; }
+            } catch (Exception ignored) { }
+        }
+        return best;
+    }
+
+    static String post(String url, String json) throws Exception {
+        HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+        con.setInstanceFollowRedirects(false);
+        con.setConnectTimeout(15000);
+        con.setReadTimeout(20000);
+        con.setRequestMethod("POST");
+        con.setDoOutput(true);
+        con.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+        try (OutputStream os = con.getOutputStream()) { os.write(json.getBytes(StandardCharsets.UTF_8)); }
+        int code = con.getResponseCode();
+        // Apps Scriptは結果を別のURLへ転送して返すので、その先をGETで読む
+        int hops = 0;
+        while (code >= 300 && code < 400 && hops < 5) {
+            String loc = con.getHeaderField("Location");
+            con.disconnect();
+            con = (HttpURLConnection) new URL(loc).openConnection();
+            con.setInstanceFollowRedirects(false);
+            con.setConnectTimeout(15000);
+            con.setReadTimeout(20000);
+            code = con.getResponseCode();
+            hops++;
+        }
+        InputStream in = code < 400 ? con.getInputStream() : con.getErrorStream();
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while (in != null && (n = in.read(buf)) > 0) bo.write(buf, 0, n);
+        con.disconnect();
+        return bo.toString("UTF-8");
+    }
+
+    static void vibrate(Context c, boolean ok) {
+        try {
+            Vibrator v = c.getSystemService(Vibrator.class);
+            long[] pattern = ok ? new long[]{0, 150, 120, 150} : new long[]{0, 700, 250, 700, 250, 700};
+            v.vibrate(VibrationEffect.createWaveform(pattern, -1));
+        } catch (Exception ignored) { }
+    }
+
+    static void notifyResult(Context c, String type, boolean ok, boolean hasLoc, String err) {
+        try {
+            Sos.ensureChannels(c);
+            String label;
+            switch (type) {
+                case "sos": label = "緊急"; break;
+                case "help": label = "ヘルプ"; break;
+                case "safe": label = "解除（無事です）"; break;
+                default: label = "テスト";
+            }
+            String title = ok ? label + "を送信しました" : label + "を送信できませんでした";
+            String text = ok ? (hasLoc ? "事業所に通知しました（現在地付き）" : "事業所に通知しました（位置情報なし）")
+                             : "すぐに電話してください。" + (err.isEmpty() ? "" : "（" + err + "）");
+            PendingIntent pi = PendingIntent.getActivity(c, 0, new Intent(c, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+            Notification n = new Notification.Builder(c, "result")
+                    .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                    .setContentTitle(title)
+                    .setContentText(text)
+                    .setStyle(new Notification.BigTextStyle().bigText(text))
+                    .setContentIntent(pi)
+                    .setAutoCancel(true)
+                    .build();
+            c.getSystemService(NotificationManager.class).notify(2, n);
+        } catch (Exception ignored) { }
+    }
+}
+=====FILE: android/app/src/main/java/jp/asuport/homonsos/SosService.java=====
+package jp.asuport.homonsos;
+
+import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.ServiceInfo;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.os.Looper;
+
+/** 訪問中だけ動く常駐サービス：位置情報を更新し続け、画面ONの時刻を記録する */
+public class SosService extends Service implements LocationListener {
+
+    private final BroadcastReceiver screenOn = new BroadcastReceiver() {
+        @Override public void onReceive(Context c, Intent i) { Sos.screenOnAt = System.currentTimeMillis(); }
+    };
+    private boolean registered = false;
+
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        Sos.ensureChannels(this);
+        String memo = Sos.prefs(this).getString("memo", "");
+        PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        Notification n = new Notification.Builder(this, "visit")
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentTitle("訪問中" + (memo.isEmpty() ? "" : "：" + memo))
+                .setContentText("スイッチ 3回=ヘルプ／5回・長押し=緊急")
+                .setOngoing(true)
+                .setContentIntent(pi)
+                .build();
+        try {
+            if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+            else startForeground(1, n);
+        } catch (Exception e) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        try {
+            LocationManager lm = getSystemService(LocationManager.class);
+            for (String p : new String[]{LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER}) {
+                if (lm.isProviderEnabled(p)) lm.requestLocationUpdates(p, 30000, 0, this, Looper.getMainLooper());
+            }
+        } catch (SecurityException ignored) { }
+        if (!registered) {
+            registerReceiver(screenOn, new IntentFilter(Intent.ACTION_SCREEN_ON));
+            registered = true;
+        }
+        return START_STICKY;
+    }
+
+    @Override public void onDestroy() {
+        try { getSystemService(LocationManager.class).removeUpdates(this); } catch (Exception ignored) { }
+        if (registered) { unregisterReceiver(screenOn); registered = false; }
+        super.onDestroy();
+    }
+
+    @Override public IBinder onBind(Intent intent) { return null; }
+
+    @Override public void onLocationChanged(Location l) { Sos.lastLoc = l; }
+    @Override public void onStatusChanged(String provider, int status, Bundle extras) { }
+    @Override public void onProviderEnabled(String provider) { }
+    @Override public void onProviderDisabled(String provider) { }
+}
+=====FILE: android/app/src/main/java/jp/asuport/homonsos/KeyService.java=====
+package jp.asuport.homonsos;
+
+import android.accessibilityservice.AccessibilityService;
+import android.os.Build;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.accessibility.AccessibilityEvent;
+
+/** Bluetoothスイッチ（外付けキーボードとして認識されるもの）の操作を受け取る */
+public class KeyService extends AccessibilityService {
+
+    @Override protected boolean onKeyEvent(KeyEvent e) {
+        if (!(Sos.testMode || Sos.visiting(this))) return false;
+        if (!isRemote(e)) return false;
+        String dev = e.getDevice() != null ? e.getDevice().getName() : "-";
+        String info = "key=" + KeyEvent.keyCodeToString(e.getKeyCode()) + " / " + dev;
+        if (e.getAction() == KeyEvent.ACTION_DOWN) {
+            if (e.getRepeatCount() == 0) Sos.keyDown(this, info);
+        } else if (e.getAction() == KeyEvent.ACTION_UP) {
+            Sos.keyUp(this);
+        }
+        return true; // スイッチの操作は他のアプリに渡さない
+    }
+
+    /** スマホ本体のボタンではなく、外付けの機器からの操作かどうか */
+    private boolean isRemote(KeyEvent e) {
+        int code = e.getKeyCode();
+        if (code == KeyEvent.KEYCODE_POWER) return false;
+        InputDevice d = e.getDevice();
+        if (d == null || d.isVirtual()) return false;
+        if (Build.VERSION.SDK_INT >= 29) return d.isExternal();
+        // 古いAndroid：本体の音量ボタンを誤検知しないよう、音量キーは対象外
+        return code != KeyEvent.KEYCODE_VOLUME_UP && code != KeyEvent.KEYCODE_VOLUME_DOWN;
+    }
+
+    @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
+    @Override public void onInterrupt() { }
+}
+=====FILE: android/app/src/main/java/jp/asuport/homonsos/MainActivity.java=====
+package jp.asuport.homonsos;
+
+import android.Manifest;
+import android.app.Activity;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
+import android.text.InputType;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.Locale;
+
+public class MainActivity extends Activity {
+    static final int BG = 0xFF1F2A37, CARD = 0xFF2B3848, TEXT = 0xFFF4F6F8, SUB = 0xFFA9B4C2;
+    static final int HELP = 0xFFF2A33A, SOSC = 0xFFE0413A, OK = 0xFF2FA36B, GRAY = 0xFF46586E, FIELD = 0xFF16202B;
+
+    private EditText eName, eOffice, eTel, eUrl, eKey, eMemo;
+    private Button bVisit, bTest;
+    private TextView tStatus, tAcc, tCount, tJudge, tKey, tSent;
+    private LinearLayout testBox;
+
+    @Override protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        getWindow().setStatusBarColor(BG);
+        SharedPreferences p = Sos.prefs(this);
+
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(BG);
+        LinearLayout root = col();
+        root.setPadding(dp(16), dp(20), dp(16), dp(40));
+        sv.addView(root);
+
+        TextView title = text("訪問SOS", 22, TEXT);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        root.addView(title);
+        tStatus = text("", 14, SUB);
+        root.addView(tStatus);
+
+        root.addView(label("訪問先メモ（例：〇〇町 Aさん宅）※個人名はイニシャル推奨"));
+        eMemo = edit(p.getString("memo", ""), "訪問先を入力", InputType.TYPE_CLASS_TEXT);
+        root.addView(eMemo);
+        bVisit = button("", OK, 20);
+        bVisit.setOnClickListener(v -> toggleVisit());
+        root.addView(bVisit, lp(64));
+
+        Button help = button("ヘルプ（長押し）", HELP, 26);
+        help.setTextColor(0xFF2A1A00);
+        help.setOnClickListener(v -> toast("長押しで送信します"));
+        help.setOnLongClickListener(v -> { sendNow("help"); return true; });
+        root.addView(help, lp(110));
+
+        Button sos = button("緊 急（長押し）", SOSC, 34);
+        sos.setOnClickListener(v -> toast("長押しで送信します"));
+        sos.setOnLongClickListener(v -> { sendNow("sos"); return true; });
+        root.addView(sos, lp(160));
+
+        Button safe = button("無事です（解除を通知）", GRAY, 16);
+        safe.setOnClickListener(v -> sendNow("safe"));
+        root.addView(safe, lp(52));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        Button c110 = button("110番に電話", 0xFFFFFFFF, 16);
+        c110.setTextColor(SOSC);
+        c110.setOnClickListener(v -> dial("110"));
+        Button cOff = button("事業所に電話", GRAY, 16);
+        cOff.setOnClickListener(v -> dial(Sos.prefs(this).getString("tel", "")));
+        row.addView(c110, wlp());
+        row.addView(cOff, wlp());
+        root.addView(row);
+        tSent = text("", 13, SUB);
+        root.addView(tSent);
+
+        // ---- Bluetoothスイッチ ----
+        root.addView(header("Bluetoothスイッチ"));
+        root.addView(text("3回続けて押す → ヘルプ\n5回続けて押す・2秒長押し → 緊急\n1〜2回 → 何もしない\n※「訪問開始」中だけ反応します。画面が消えていても使えます。", 14, TEXT));
+        tAcc = text("", 14, SUB);
+        root.addView(tAcc);
+        Button bAcc = button("スイッチ受信をオンにする（ユーザー補助）", GRAY, 15);
+        bAcc.setOnClickListener(v -> {
+            toast("一覧から「訪問SOS スイッチ受信」を選んでオンにしてください");
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        });
+        root.addView(bAcc, lp(56));
+        bTest = button("スイッチのテストを始める", GRAY, 15);
+        bTest.setOnClickListener(v -> toggleTest());
+        root.addView(bTest, lp(52));
+        testBox = col();
+        testBox.setVisibility(View.GONE);
+        testBox.setPadding(dp(14), dp(14), dp(14), dp(14));
+        testBox.setBackground(round(FIELD));
+        tCount = text("0", 48, TEXT);
+        tCount.setGravity(Gravity.CENTER);
+        tJudge = text("スイッチを押してください", 18, TEXT);
+        tJudge.setGravity(Gravity.CENTER);
+        tKey = text("受信した信号：まだありません", 12, SUB);
+        tKey.setGravity(Gravity.CENTER);
+        testBox.addView(tCount);
+        testBox.addView(tJudge);
+        testBox.addView(tKey);
+        testBox.addView(text("テスト中は通報は送られません。反応しない場合は、上の「スイッチ受信」がオンか確認してください。", 12, SUB));
+        root.addView(testBox);
+        Button bBat = button("電池の最適化を解除する（止まらないように）", GRAY, 15);
+        bBat.setOnClickListener(v -> askBattery());
+        root.addView(bBat, lp(56));
+
+        // ---- 設定 ----
+        root.addView(header("設定"));
+        root.addView(label("あなたの名前"));
+        eName = edit(p.getString("name", ""), "例：山田 花子", InputType.TYPE_CLASS_TEXT);
+        root.addView(eName);
+        root.addView(label("事業所名"));
+        eOffice = edit(p.getString("office", ""), "例：〇〇居宅介護支援事業所", InputType.TYPE_CLASS_TEXT);
+        root.addView(eOffice);
+        root.addView(label("事業所の電話番号"));
+        eTel = edit(p.getString("tel", ""), "例：084-000-0000", InputType.TYPE_CLASS_PHONE);
+        root.addView(eTel);
+        root.addView(label("送信先URL"));
+        eUrl = edit(Sos.url(this), "https://script.google.com/macros/s/.../exec", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        root.addView(eUrl);
+        root.addView(label("事業所コード"));
+        eKey = edit(Sos.key(this), "例：sos-2026", InputType.TYPE_CLASS_TEXT);
+        root.addView(eKey);
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        Button bSend = button("テスト送信", GRAY, 16);
+        bSend.setOnClickListener(v -> { save(); sendNow("test"); });
+        Button bSave = button("保存", OK, 16);
+        bSave.setOnClickListener(v -> { save(); toast("保存しました"); refresh(); });
+        row2.addView(bSend, wlp());
+        row2.addView(bSave, wlp());
+        root.addView(row2);
+        root.addView(text("このアプリは事業所への応援要請用です。命に関わるときは迷わず110番してください。", 12, SUB));
+
+        setContentView(sv);
+
+        Sos.listener = (what, value) -> {
+            switch (what) {
+                case "key": tKey.setText("受信した信号：" + value); break;
+                case "count": tCount.setText(value); tJudge.setText("…"); break;
+                case "judge": tJudge.setText(value); break;
+                case "sent": tSent.setText("前回の送信：" + value + "（" + new SimpleDateFormat("HH:mm:ss", Locale.JAPAN).format(new Date()) + "）"); break;
+            }
+        };
+        requestPerms();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        refresh();
+    }
+
+    @Override protected void onDestroy() {
+        Sos.testMode = false;
+        Sos.listener = null;
+        super.onDestroy();
+    }
+
+    private void sendNow(String type) {
+        save();
+        if (Sos.prefs(this).getString("name", "").isEmpty()) { toast("設定で名前を入力して保存してください"); return; }
+        Sender.send(this, type, "screen");
+        toast("送信しています…");
+    }
+
+    private void toggleVisit() {
+        SharedPreferences p = Sos.prefs(this);
+        if (!Sos.visiting(this)) {
+            save();
+            if (p.getString("name", "").isEmpty()) { toast("設定で名前を入力して保存してください"); return; }
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                requestPerms();
+                toast("位置情報の利用を許可してください");
+                return;
+            }
+            p.edit().putBoolean("visiting", true)
+                    .putString("memo", eMemo.getText().toString().trim())
+                    .putLong("visitAt", System.currentTimeMillis()).apply();
+            startForegroundService(new Intent(this, SosService.class));
+            if (!Sos.accEnabled(this)) toast("スイッチ受信がオフです。スイッチを使うならオンにしてください");
+        } else {
+            p.edit().putBoolean("visiting", false).apply();
+            stopService(new Intent(this, SosService.class));
+        }
+        refresh();
+    }
+
+    private void toggleTest() {
+        Sos.testMode = !Sos.testMode;
+        testBox.setVisibility(Sos.testMode ? View.VISIBLE : View.GONE);
+        bTest.setText(Sos.testMode ? "スイッチのテストを終わる" : "スイッチのテストを始める");
+        tCount.setText("0");
+        tJudge.setText("スイッチを押してください");
+        if (getCurrentFocus() != null) getCurrentFocus().clearFocus();
+    }
+
+    private void refresh() {
+        SharedPreferences p = Sos.prefs(this);
+        boolean on = Sos.visiting(this);
+        if (on) {
+            String at = new SimpleDateFormat("HH:mm", Locale.JAPAN).format(new Date(p.getLong("visitAt", 0)));
+            String memo = p.getString("memo", "");
+            tStatus.setText("訪問中：" + (memo.isEmpty() ? "（訪問先未入力）" : memo) + "（" + at + "〜）スイッチ受付中");
+            tStatus.setTextColor(0xFF7FE0AE);
+            bVisit.setText("退出（訪問を終える）");
+            bVisit.setBackground(round(GRAY));
+        } else {
+            tStatus.setText("訪問中ではありません　使用者：" + (p.getString("name", "").isEmpty() ? "未設定" : p.getString("name", "")));
+            tStatus.setTextColor(SUB);
+            bVisit.setText("訪問開始");
+            bVisit.setBackground(round(OK));
+        }
+        tAcc.setText(Sos.accEnabled(this) ? "スイッチ受信：オン ✓" : "スイッチ受信：オフ（下のボタンから「訪問SOS スイッチ受信」をオンに）");
+        tAcc.setTextColor(Sos.accEnabled(this) ? 0xFF7FE0AE : HELP);
+    }
+
+    private void save() {
+        Sos.prefs(this).edit()
+                .putString("name", eName.getText().toString().trim())
+                .putString("office", eOffice.getText().toString().trim())
+                .putString("tel", eTel.getText().toString().trim())
+                .putString("url", eUrl.getText().toString().trim())
+                .putString("key", eKey.getText().toString().trim())
+                .putString("memo", eMemo.getText().toString().trim())
+                .apply();
+    }
+
+    private void requestPerms() {
+        ArrayList<String> need = new ArrayList<>();
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            need.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            need.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            need.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+        if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 1);
+    }
+
+    private void askBattery() {
+        PowerManager pm = getSystemService(PowerManager.class);
+        if (pm.isIgnoringBatteryOptimizations(getPackageName())) { toast("すでに解除されています"); return; }
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        }
+    }
+
+    private void dial(String tel) {
+        if (tel == null || tel.isEmpty()) { toast("設定で事業所の電話番号を入力してください"); return; }
+        startActivity(new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + tel.replaceAll("[^0-9+]", ""))));
+    }
+
+    // ---- 画面部品 ----
+    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+    private LinearLayout col() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); return l; }
+    private TextView text(String s, int sp, int color) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(sp);
+        t.setTextColor(color);
+        t.setPadding(0, dp(4), 0, dp(4));
+        t.setLineSpacing(0, 1.2f);
+        return t;
+    }
+    private TextView label(String s) { TextView t = text(s, 13, SUB); t.setPadding(0, dp(10), 0, dp(2)); return t; }
+    private TextView header(String s) {
+        TextView t = text(s, 18, TEXT);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setPadding(0, dp(24), 0, dp(4));
+        return t;
+    }
+    private EditText edit(String value, String hint, int type) {
+        EditText e = new EditText(this);
+        e.setText(value);
+        e.setHint(hint);
+        e.setInputType(type);
+        e.setSingleLine(true);
+        e.setTextColor(TEXT);
+        e.setHintTextColor(0xFF6B7A8C);
+        e.setTextSize(16);
+        e.setBackground(round(FIELD));
+        e.setPadding(dp(12), dp(10), dp(12), dp(10));
+        return e;
+    }
+    private GradientDrawable round(int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(dp(14));
+        return g;
+    }
+    private Button button(String s, int color, int sp) {
+        Button b = new Button(this);
+        b.setText(s);
+        b.setAllCaps(false);
+        b.setTextSize(sp);
+        b.setTextColor(0xFFFFFFFF);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setBackground(round(color));
+        b.setStateListAnimator(null);
+        return b;
+    }
+    private LinearLayout.LayoutParams lp(int h) {
+        LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(h));
+        l.setMargins(0, dp(8), 0, dp(4));
+        return l;
+    }
+    private LinearLayout.LayoutParams wlp() {
+        LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(0, dp(52), 1f);
+        l.setMargins(dp(4), dp(8), dp(4), dp(4));
+        return l;
+    }
+    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+}
